@@ -19,25 +19,37 @@ class transaction;
         $display("%t : [%s] enable = %d, d= %d, q = %d", $time, name, enable,
                  d, q);
     endfunction
+
+
 endclass
 
 class generator;
     //transaction handler
     transaction tr;
+    transaction tr_scb;
     mailbox #(transaction) gen2drv_mbox;
+    mailbox #(transaction) gen2scb_mbox;
     //event handler
     event event2_gen;
 
-    function new(mailbox#(transaction) gen2drv_mbox, event event2_gen);
+    function new(mailbox#(transaction) gen2drv_mbox,
+                 mailbox#(transaction) gen2scb_mbox, event event2_gen);
         this.gen2drv_mbox = gen2drv_mbox;
+        this.gen2scb_mbox = gen2scb_mbox;
         this.event2_gen   = event2_gen;
     endfunction
 
     task run(int run_count);
         repeat (run_count) begin
             tr = new;
+            tr_scb = new;
             tr.randomize();
+            tr_scb.enable = tr.enable;
+            tr_scb.d = tr.d;
+            tr_scb.q = tr.q;
             gen2drv_mbox.put(tr);
+            gen2scb_mbox.put(tr_scb);
+            tr_scb.debug_print("GEN_TR_SCB");
             tr.debug_print("GEN");
             @(event2_gen);
         end
@@ -61,16 +73,16 @@ class driver;
         reg_vif.rst = 1;
         reg_vif.enable = 0;
         reg_vif.d = 0;
-        @(posedge reg_vif.clk);
-        @(posedge reg_vif.clk);
-        //2번 반복
+        @(negedge reg_vif.clk);
+        @(negedge reg_vif.clk);
         reg_vif.rst = 0;
-        @(posedge reg_vif.clk);
+        @(negedge reg_vif.clk);
     endtask
 
     task run();
         forever begin
             gen2drv_mbox.get(tr);
+            // //hw12-1
             @(posedge reg_vif.clk);
             #1;
             reg_vif.enable = tr.enable;
@@ -106,20 +118,41 @@ endclass
 
 class scoreboard;
     transaction tr;
+    transaction tr_scb;
+    // generator에서 scoreboard로 mailbox추가
+    mailbox #(transaction) gen2scb_mbox;
     mailbox #(transaction) mon2scb_mbox;
     event event2_gen;
 
-    function new(mailbox#(transaction) mon2scb_mbox, event event2_gen);
+    function new(mailbox#(transaction) mon2scb_mbox,
+                 mailbox#(transaction) gen2scb_mbox, event event2_gen);
         this.mon2scb_mbox = mon2scb_mbox;
+        this.gen2scb_mbox = gen2scb_mbox;
         this.event2_gen   = event2_gen;
     endfunction
 
+    // logic [31:0] previous_d;
+    bit first_flag = 0;
+
     task run();
         forever begin
-            mon2scb_mbox.get(tr);
-            tr.debug_print("SCB");
-            //pass/fail
-            //
+            mon2scb_mbox.get(tr);  // monitor에서 수신
+            if (first_flag) begin
+                tr.debug_print("SCB");
+                //pass/fail 이전입력값과 현재 출력 tr.q 비교 
+                //  monitor에서 올라온 걸 scb에서 비교 후 저장
+                if (tr_scb.enable) begin
+                    if (tr_scb.d == tr.q) $display("PASS");
+                    else
+                        $display(
+                            "FAIL : gen_d = %d, tr.q = %d", tr_scb.d, tr.q
+                        );
+                    // if (previous_d == tr.q) $display("PASS");
+                    // else $display("FAIL : pre_d = %d, tr.q = %d", previous_d, tr.q);
+                    // previous_d = tr_gen.d;
+                end
+            end else first_flag = 1;
+            gen2scb_mbox.get(tr_scb);  // generator에서 수신
             ->event2_gen;
         end
     endtask
@@ -135,17 +168,19 @@ class environment;
 
     mailbox #(transaction) gen2drv_mbox;
     mailbox #(transaction) mon2scb_mbox;
+    mailbox #(transaction) gen2scb_mbox;
 
     event event2_gen;
 
     function new(virtual reg_interface reg_vif);
         gen2drv_mbox = new;
         mon2scb_mbox = new;
+        gen2scb_mbox = new;
 
-        gen = new(gen2drv_mbox, event2_gen);
+        gen = new(gen2drv_mbox, gen2scb_mbox, event2_gen);
         drv = new(gen2drv_mbox, reg_vif);
         mon = new(mon2scb_mbox, reg_vif);
-        scb = new(mon2scb_mbox, event2_gen);
+        scb = new(mon2scb_mbox, gen2scb_mbox, event2_gen);
     endfunction
 
     task run();
